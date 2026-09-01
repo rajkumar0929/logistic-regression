@@ -1,0 +1,77 @@
+import sys
+
+import numpy as np
+import pandas as pd
+
+FEATURE_EXCLUDE = {"release_id", "label"}
+
+
+def get_feature_columns(df):
+    """Return the 78 feature column names, in file order, excluding release_id/label."""
+    return [c for c in df.columns if c not in FEATURE_EXCLUDE]
+
+
+def load_xy(path, feature_cols=None, has_label=True):
+    """
+    Read a part_ab_*.csv file.
+
+    Returns:
+        X: (n, 78) float64 ndarray of feature values, in `feature_cols` order
+           (or file order if feature_cols is None).
+        y: (n,) int ndarray of labels, or None if has_label is False.
+        feature_cols: the feature column names used (so the caller can reuse
+           the same order for other splits).
+    """
+    df = pd.read_csv(path)
+    if feature_cols is None:
+        feature_cols = get_feature_columns(df)
+
+    X = df[feature_cols].to_numpy(dtype=np.float64)
+    y = df["label"].to_numpy(dtype=np.int64) if has_label else None
+
+    return X, y, feature_cols
+
+
+def standardize_fit(X_train):
+    """
+    Compute per-feature mean and std from the TRAINING set only.
+
+    Returns:
+        mean: (78,) ndarray
+        std:  (78,) ndarray
+    """
+    mean = X_train.mean(axis=0)
+    std = X_train.std(axis=0)
+    return mean, std
+
+
+def standardize_apply(X, mean, std):
+    """Apply a previously-fit (mean, std) transform to X. Never refit here."""
+    return (X - mean) / std
+
+
+def main():
+    if len(sys.argv) != 6:
+        print(
+            "usage: python3 part_a.py train.csv test.csv "
+            "{full_batch,mini_batch,sgd,adagrad} predictions.txt weights.txt",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    train_path, test_path, method, predictions_path, weights_path = sys.argv[1:]
+
+    X_train_raw, y_train, feature_cols = load_xy(train_path, has_label=True)
+    X_test_raw, _, _ = load_xy(test_path, feature_cols=feature_cols, has_label=False)
+
+    mean, std = standardize_fit(X_train_raw)
+    X_train = standardize_apply(X_train_raw, mean, std)
+    X_test = standardize_apply(X_test_raw, mean, std)
+
+    # TODO (later steps): train with the requested method, write predictions.txt
+    # and weights.txt.
+    raise NotImplementedError(f"method dispatch for '{method}' not implemented yet")
+
+
+if __name__ == "__main__":
+    main()
