@@ -510,4 +510,47 @@ so generating those plots will need a separate small script that reuses these sa
 
 ---
 
+## Step 7: Report plots (training/validation loss vs. time)
+
+**What we're doing:** generating the two required report plots — training loss and validation loss
+vs. wall-clock time, all four methods on the same axes — via a separate script
+(`make_report_plots.py`), NOT by modifying the graded `part_a.py`.
+
+**Why a separate script:** `part_a.py`'s graded CLI only accepts `train.csv` + `test.csv` (per
+spec) and only needs to record training loss — no validation path, no timing requirement. Adding
+those would deviate from the exact spec'd interface. So `make_report_plots.py` imports and reuses
+`part_a.py`'s building blocks (`load_xy`, `standardize_fit/apply`, `compute_gradients`,
+`cross_entropy_loss`, `iterate_batches`) but adds two things per epoch: `time.time()` elapsed since
+training started, and the loss on `part_ab_val.csv` (standardized using the SAME training-set
+mean/std — never refit on validation data).
+
+**Why time on the x-axis, not epoch number:** the four methods run different epoch budgets
+(full-batch 500, mini-batch 200, SGD 30, AdaGrad 200) — comparing "loss after epoch 50" would be
+meaningless across methods. Wall-clock time is the fair common axis: it answers "how much does
+each method reduce loss per second of actual training," which is what the report asks us to
+compare.
+
+**Results (see `report_assets/train_loss_vs_time.png`, `val_loss_vs_time.png`):**
+- **Fastest to reduce loss:** mini-batch GD and AdaGrad, both converging within ~1 second to the
+  lowest loss reached by any method (~0.46 train / ~0.53 val).
+- **Full-batch GD:** steady, monotonic decrease, but slower per second of wall-clock time — takes
+  ~3+ seconds to approach the same loss mini-batch/AdaGrad reach almost immediately.
+- **SGD:** noisiest curve (expected — gradients from a single example are high-variance), and
+  converges to a *slightly* higher loss than the others (~0.485 train) within its 30-epoch budget.
+- **Overfitting:** neither training nor validation loss shows an uptick anywhere in the observed
+  range for any method — both curves flatten out together and stay flat. This is itself a valid
+  report finding: no overfitting observed within the prescribed epoch budgets.
+
+**The code (make_report_plots.py):** mirrors each `train_*` function from Step 4, with two
+additions per epoch:
+```python
+times.append(time.time() - t0)
+train_losses.append(cross_entropy_loss(X, y, W, b))
+val_losses.append(cross_entropy_loss(X_val, y_val, W, b))
+```
+Plots are made with matplotlib (`Agg` backend, since this runs headless), one figure per metric,
+one line per method, saved to `report_assets/*.png` for direct inclusion in `report.pdf`.
+
+---
+
 *(more sections appended as we progress through the assignment)*
