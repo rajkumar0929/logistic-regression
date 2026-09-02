@@ -42,6 +42,10 @@ def standardize_fit(X_train):
     """
     mean = X_train.mean(axis=0)
     std = X_train.std(axis=0)
+    std[std == 0] = 1.0    # constant columns (e.g. signal_mad) would divide 0/0 -> nan;
+                            # every value in such a column equals the mean, so (x-mean)=0
+                            # regardless of the divisor -- replacing 0 with 1 keeps that 0
+                            # without introducing nan.
     return mean, std
 
 
@@ -100,6 +104,94 @@ def compute_gradients(X, y, W, b):
     grad_b = E.sum(axis=0) / m     # (3,) - average error per class
 
     return grad_W, grad_b
+
+
+def iterate_batches(n, batch_size, rng=None):
+    """
+    Yield index arrays that partition range(n) into consecutive batches of
+    `batch_size` (the last batch may be smaller).
+
+    If `rng` is given, indices are freshly shuffled first (rng.permutation(n))
+    before slicing. If `rng` is None, the original order 0..n-1 is used
+    unshuffled -- this is what full-batch GD requires ("no shuffling occurs").
+    """
+    order = rng.permutation(n) if rng is not None else np.arange(n)
+    for start in range(0, n, batch_size):
+        yield order[start:start + batch_size]
+
+
+def train_full_batch(X, y, epochs=500, eta=0.3):
+    """Method 1: one gradient step per epoch, over the entire training set."""
+    n, d = X.shape
+    W = np.zeros((d, 3), dtype=np.float64)
+    b = np.zeros(3, dtype=np.float64)
+    losses = []
+
+    for _ in range(epochs):
+        for batch_idx in iterate_batches(n, batch_size=n, rng=None):
+            X_B, y_B = X[batch_idx], y[batch_idx]
+            grad_W, grad_b = compute_gradients(X_B, y_B, W, b)
+            W -= eta * grad_W
+            b -= eta * grad_b
+        losses.append(cross_entropy_loss(X, y, W, b))
+
+    return W, b, losses
+
+
+def train_mini_batch(X, y, epochs=200, eta=0.03, batch_size=32, seed=774):
+    """Method 2 (and Method 3, SGD, via batch_size=1): reshuffle every epoch,
+    one gradient step per consecutive chunk of `batch_size` indices."""
+    n, d = X.shape
+    W = np.zeros((d, 3), dtype=np.float64)
+    b = np.zeros(3, dtype=np.float64)
+    rng = np.random.default_rng(seed)
+    losses = []
+
+    for _ in range(epochs):
+        for batch_idx in iterate_batches(n, batch_size=batch_size, rng=rng):
+            X_B, y_B = X[batch_idx], y[batch_idx]
+            grad_W, grad_b = compute_gradients(X_B, y_B, W, b)
+            W -= eta * grad_W
+            b -= eta * grad_b
+        losses.append(cross_entropy_loss(X, y, W, b))
+
+    return W, b, losses
+
+
+def train_sgd(X, y, epochs=30, eta=0.001, seed=774):
+    """Method 3: mini-batch GD with batch size 1."""
+    return train_mini_batch(X, y, epochs=epochs, eta=eta, batch_size=1, seed=seed)
+
+
+def train_adagrad(X, y, epochs=200, eta=0.3, batch_size=32, eps=1e-8, seed=774):
+    """Method 4: mini-batch GD with a per-parameter adaptive learning rate."""
+    n, d = X.shape
+    W = np.zeros((d, 3), dtype=np.float64)
+    b = np.zeros(3, dtype=np.float64)
+    G_W = np.zeros_like(W)         # per-parameter accumulated squared gradients
+    G_b = np.zeros_like(b)
+    rng = np.random.default_rng(seed)
+    losses = []
+
+    for _ in range(epochs):
+        for batch_idx in iterate_batches(n, batch_size=batch_size, rng=rng):
+            X_B, y_B = X[batch_idx], y[batch_idx]
+            grad_W, grad_b = compute_gradients(X_B, y_B, W, b)
+            G_W += grad_W * grad_W
+            G_b += grad_b * grad_b
+            W -= eta * grad_W / (np.sqrt(G_W) + eps)
+            b -= eta * grad_b / (np.sqrt(G_b) + eps)
+        losses.append(cross_entropy_loss(X, y, W, b))
+
+    return W, b, losses
+
+
+METHODS = {
+    "full_batch": lambda X, y: train_full_batch(X, y, epochs=500, eta=0.3),
+    "mini_batch": lambda X, y: train_mini_batch(X, y, epochs=200, eta=0.03, batch_size=32),
+    "sgd": lambda X, y: train_sgd(X, y, epochs=30, eta=0.001),
+    "adagrad": lambda X, y: train_adagrad(X, y, epochs=200, eta=0.3, batch_size=32, eps=1e-8),
+}
 
 
 def main():

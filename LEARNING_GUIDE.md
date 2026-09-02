@@ -104,6 +104,13 @@ def standardize_apply(X, mean, std):
   loop. This is why `standardize_apply` can be reused unchanged for train, val, and test: it just
   needs whatever `mean`/`std` you pass it.
 
+**Bug found during Step 4 verification:** two feature columns (`signal_mad`, `valid_rr_fraction`)
+are exactly constant (`1.0`) across the whole training set, so their std is `0`, and
+`(X - mean) / std` computed `0/0 = nan` for those columns — which then poisoned every gradient.
+Fixed by adding `std[std == 0] = 1.0` in `standardize_fit`: since a constant column's value always
+equals its own mean, `(x - mean)` is already `0` for every row of that column, so the divisor
+doesn't matter as long as it isn't `0` — this just avoids manufacturing a `nan`.
+
 ---
 
 ## Step 2: Softmax + cross-entropy loss
@@ -250,6 +257,149 @@ def compute_gradients(X, y, W, b):
 - Dividing by `m = X.shape[0]` (the batch's own size) rather than a fixed `n` is exactly the
   spec's batch-size gradient rule, and is what makes this one function correct for all four
   methods in Step 4.
+
+---
+
+## Step 4: The four training loops
+
+**What we're doing:** combining Steps 2-3 into actual training for all four required optimisers,
+using the exact prescribed hyperparameters, then verifying our implementation epoch-by-epoch
+against the reference weight/loss traces in `data/weight_traces/`.
+
+**Prescribed hyperparameters (exact, autograded):**
+
+```
+Method             epochs   learning rate   batch size   extra
+Full-batch GD        500        0.3         all n        -
+Mini-batch GD         200        0.03        32           -
+SGD                    30        0.001        1           -
+Mini-batch AdaGrad    200        0.3         32           eps = 1e-8
+All methods: shuffling seed 774
+```
+
+**The shared structure:**
+
+```
+W = zeros(78,3), b = zeros(3)                 # same init every method
+rng = numpy.random.default_rng(774)           # created ONCE, before training
+
+for epoch in range(num_epochs):
+    batches = <index-arrays partitioning all n training rows>
+    for batch_indices in batches:
+        X_B, y_B = X_train[batch_indices], y_train[batch_indices]
+        grad_W, grad_b = compute_gradients(X_B, y_B, W, b)    # |B| = len(batch_indices)
+        <update W, b -- differs per method, see below>
+    loss = cross_entropy_loss(X_train, y_train, W, b)         # FULL training set, every epoch
+    record loss
+```
+
+**How batches differ per method:**
+- **Full-batch GD:** no shuffling — the one batch is all `n` rows, every epoch, original order.
+- **Mini-batch GD:** at the START of every epoch, `order = rng.permutation(n)`, then sliced into
+  consecutive chunks of 32 (`order[0:32]`, `order[32:64]`, ...; last chunk possibly smaller).
+- **SGD:** identical to mini-batch, chunk size 1.
+- **Mini-batch AdaGrad:** same batching as mini-batch GD (chunks of 32, reshuffled every epoch).
+
+**How the update rule differs per method:**
+
+Plain GD (full-batch / mini-batch / SGD — same rule, different `eta` and batch size):
+```
+W = W - eta * grad_W
+b = b - eta * grad_b
+```
+
+AdaGrad accumulates squared gradients per parameter (never reset across the whole run, not per
+epoch) and divides the learning rate by their square root — parameters with big past gradients
+get smaller effective steps, automatically, per-parameter:
+```
+G_W = 0, G_b = 0                          # accumulators, persist across the WHOLE run
+# every batch:
+G_W = G_W + grad_W * grad_W               # element-wise square, accumulated
+W   = W - eta * grad_W / (sqrt(G_W) + eps)
+# same for b, G_b
+```
+
+**Recording loss:** after every FULL epoch (not every batch), compute `cross_entropy_loss` over
+the ENTIRE training set with the current `W, b`, regardless of which method/batch-size trained it.
+
+**The code (part_a.py):**
+
+```python
+def iterate_batches(n, batch_size, rng=None):
+    order = rng.permutation(n) if rng is not None else np.arange(n)
+    for start in range(0, n, batch_size):
+        yield order[start:start + batch_size]
+
+
+def train_full_batch(X, y, epochs=500, eta=0.3):
+    n, d = X.shape
+    W = np.zeros((d, 3), dtype=np.float64)
+    b = np.zeros(3, dtype=np.float64)
+    losses = []
+    for _ in range(epochs):
+        for batch_idx in iterate_batches(n, batch_size=n, rng=None):
+            X_B, y_B = X[batch_idx], y[batch_idx]
+            grad_W, grad_b = compute_gradients(X_B, y_B, W, b)
+            W -= eta * grad_W
+            b -= eta * grad_b
+        losses.append(cross_entropy_loss(X, y, W, b))
+    return W, b, losses
+
+
+def train_mini_batch(X, y, epochs=200, eta=0.03, batch_size=32, seed=774):
+    n, d = X.shape
+    W = np.zeros((d, 3), dtype=np.float64)
+    b = np.zeros(3, dtype=np.float64)
+    rng = np.random.default_rng(seed)
+    losses = []
+    for _ in range(epochs):
+        for batch_idx in iterate_batches(n, batch_size=batch_size, rng=rng):
+            X_B, y_B = X[batch_idx], y[batch_idx]
+            grad_W, grad_b = compute_gradients(X_B, y_B, W, b)
+            W -= eta * grad_W
+            b -= eta * grad_b
+        losses.append(cross_entropy_loss(X, y, W, b))
+    return W, b, losses
+
+
+def train_sgd(X, y, epochs=30, eta=0.001, seed=774):
+    return train_mini_batch(X, y, epochs=epochs, eta=eta, batch_size=1, seed=seed)
+
+
+def train_adagrad(X, y, epochs=200, eta=0.3, batch_size=32, eps=1e-8, seed=774):
+    n, d = X.shape
+    W = np.zeros((d, 3), dtype=np.float64)
+    b = np.zeros(3, dtype=np.float64)
+    G_W = np.zeros_like(W)
+    G_b = np.zeros_like(b)
+    rng = np.random.default_rng(seed)
+    losses = []
+    for _ in range(epochs):
+        for batch_idx in iterate_batches(n, batch_size=batch_size, rng=rng):
+            X_B, y_B = X[batch_idx], y[batch_idx]
+            grad_W, grad_b = compute_gradients(X_B, y_B, W, b)
+            G_W += grad_W * grad_W
+            G_b += grad_b * grad_b
+            W -= eta * grad_W / (np.sqrt(G_W) + eps)
+            b -= eta * grad_b / (np.sqrt(G_b) + eps)
+        losses.append(cross_entropy_loss(X, y, W, b))
+    return W, b, losses
+```
+
+**Verification result:** ran all four methods for 5 epochs and compared against
+`data/weight_traces/part_a/*_epoch{1-5}.txt` and `loss_by_epoch.csv` — max weight/bias differences
+were ~1e-10, and losses matched to ~1e-15, both consistent with ordinary floating-point noise. All
+four training loops are confirmed correct.
+
+**Why each piece matters:**
+- `iterate_batches` is one function reused by all four methods — passing `rng=None` gives
+  unshuffled full-batch behavior, passing an `rng` gives the fresh-shuffle-every-epoch behavior the
+  other three need. This avoids duplicating the batching logic four times.
+- `train_sgd` is implemented as `train_mini_batch(..., batch_size=1)` since the spec defines SGD as
+  exactly that — no separate logic needed.
+- AdaGrad's `G_W`, `G_b` accumulators are created ONCE outside the epoch loop and never reset —
+  they track the sum of squared gradients over the *entire* training run, which is what makes the
+  effective learning rate shrink over time.
 
 ---
 
