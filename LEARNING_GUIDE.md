@@ -553,4 +553,305 @@ one line per method, saved to `report_assets/*.png` for direct inclusion in `rep
 
 ---
 
+## Part (b) — Overview
+
+Same 3-class softmax classifier, same data, but studying **class imbalance** (Normal is the
+majority class, AF is rare). The optimizer is fixed to mini-batch AdaGrad with Part (a)'s exact
+hyperparameters (200 epochs, eta=0.3, batch=32, eps=1e-8, seed 774) — isolating the effect of
+imbalance-handling from the choice of optimizer.
+
+Four methods:
+1. **Baseline** — plain cross-entropy, no special handling (mathematically identical to Part (a)'s
+   AdaGrad — confirmed: `baseline_epoch{1-5}` reference losses exactly match Part (a)'s
+   `adagrad_epoch{1-5}`).
+2. **Classweight** (full-strength inverse-frequency weighting) — rare-class examples up-weighted
+   in the loss, proportional to how rare their class is.
+3. **Classweight2** — same idea, dampened exponent (0.3 instead of 1) — a gentler nudge.
+4. **Focal loss** — a *dynamic* per-example weight recomputed every update based on how wrong the
+   model currently is on that example, not fixed by class.
+
+Build order: (1) bring over Part (a)'s shared foundation (loading/standardization/softmax/one-hot,
+writers, CLI skeleton) unchanged, self-contained in `part_b.py`; (2) class weights (alpha); (3)
+weighted-gradient AdaGrad training loop (covers Baseline + Classweight + Classweight2 — same
+function, different alpha); (4) focal loss (own loss + gradient formula); (5) verify all four
+against `data/weight_traces/part_b/*_epoch{1-5}.txt` and `loss_by_epoch.csv`; (6) CLI wiring.
+
+## Step 1 (part_b.py): Shared foundation
+
+`part_b.py` starts with exactly Part (a)'s `load_xy`, `standardize_fit`/`standardize_apply`
+(including the zero-std fix), `compute_logits`, `softmax`, `one_hot`, `iterate_batches`,
+`format_row`, `write_weights`, `write_predictions`, and the same CLI skeleton — copied rather than
+imported from `part_a.py`, so `part_b.py` runs correctly even if graded/copied in isolation. See
+Part (a) Steps 1, 2, 3, 5, 6 above for the explanations of each of these — nothing about them
+changes for Part (b).
+
+---
+
+## Step 2 (part_b.py): Class weights (alpha)
+
+**What we're doing:** computing one weight per class reflecting how rare it is, so rare-class
+examples can be up-weighted in the loss/gradient.
+
+**The math:**
+```
+n_k = number of training examples of class k     (k = 0, 1, 2)
+n   = n_0 + n_1 + n_2
+
+alpha_k = n / (3 * n_k)
+```
+
+**Intuition:** if classes were perfectly balanced (`n_k = n/3` for all k), `alpha_k = 1` for every
+class -- no reweighting, matching Baseline exactly. A rare class gets `alpha_k > 1` (up-weighted);
+the majority class gets `alpha_k < 1` (down-weighted). Classweight2 uses `alpha_k ** 0.3` --
+raising to a power `< 1` compresses large alpha values back toward 1, a gentler nudge than
+full-strength Classweight, while preserving class ordering.
+
+**The code:**
+```python
+def compute_class_alpha(y, num_classes=3):
+    n = len(y)
+    counts = np.bincount(y, minlength=num_classes)   # n_k for each class
+    return n / (3.0 * counts)
+```
+`np.bincount(y, minlength=3)` counts occurrences of each label 0,1,2 in one call (no loop), giving
+`[n_0, n_1, n_2]`. `alpha_per_class[y_B]` (fancy indexing) then gives every example's own class's
+alpha value in one line, for any batch `y_B`.
+
+On the real data: `alpha_per_class = [0.528 (Normal), 3.925 (AF), 1.177 (Other)]` -- confirms AF is
+by far the rarest class, getting nearly 4x the loss weight of an average example.
+
+## Step 3 (part_b.py): Weighted-gradient AdaGrad (Baseline / Classweight / Classweight2)
+
+**What we're doing:** one training loop, parameterized by which alpha values it's given, that
+covers all three of these methods.
+
+**The math, for a batch B:**
+```
+w_i    = alpha_i / sum_{j in B} alpha_j        <- per-example weight, NORMALIZED WITHIN this batch
+E      = P_B - Y_B                             <- same error matrix as Part (a)
+E_w[i] = E[i] * w_i
+
+gW = X_B^T @ E_w
+gb = sum over rows of E_w
+```
+This replaces Part (a)'s `(1/|B|) * X_B^T @ E`: each row gets its OWN weight `w_i` (still summing
+to 1 across the batch) instead of the uniform `1/|B|`. Baseline's `alpha_i == 1` makes
+`w_i = 1/|B|` for every row -- exactly Part (a)'s formula, which is why Baseline's reference losses
+exactly match Part (a)'s AdaGrad.
+
+Classweight uses `alpha_i = alpha_per_class[y_i]` (full-strength). Classweight2 uses
+`alpha_i = alpha_per_class[y_i] ** 0.3` (dampened) -- same gradient function either way.
+
+**The epoch-level loss** (recorded for our own verification) uses a DIFFERENT, global
+normalization -- over the whole training set, not per-batch:
+```
+L = sum_i( alpha_i * -log(p_i,true) ) / sum_i( alpha_i )
+```
+
+**The code:**
+```python
+def weighted_cross_entropy_loss(X, y, W, b, alpha_per_example):
+    n = X.shape[0]
+    Z = compute_logits(X, W, b)
+    P = softmax(Z)
+    true_class_probs = P[np.arange(n), y]
+    per_example_losses = -np.log(true_class_probs)
+    return np.sum(alpha_per_example * per_example_losses) / np.sum(alpha_per_example)
+
+
+def compute_gradients_weighted(X, y, W, b, alpha_per_example):
+    Z = compute_logits(X, W, b)
+    P = softmax(Z)
+    Y = one_hot(y, num_classes=W.shape[1])
+    E = P - Y
+
+    batch_weights = alpha_per_example / alpha_per_example.sum()   # sums to 1 over this batch
+    E_weighted = E * batch_weights[:, None]
+
+    grad_W = X.T @ E_weighted
+    grad_b = E_weighted.sum(axis=0)
+    return grad_W, grad_b
+
+
+def train_weighted_adagrad(X, y, alpha_full, alpha_power, epochs=200, eta=0.3,
+                            batch_size=32, eps=1e-8, seed=774):
+    n, d = X.shape
+    W = np.zeros((d, 3), dtype=np.float64)
+    b = np.zeros(3, dtype=np.float64)
+    G_W = np.zeros_like(W)
+    G_b = np.zeros_like(b)
+    rng = np.random.default_rng(seed)
+
+    alpha_per_class = alpha_full ** alpha_power
+    alpha_per_example_full = alpha_per_class[y]
+    losses = []
+
+    for _ in range(epochs):
+        for batch_idx in iterate_batches(n, batch_size=batch_size, rng=rng):
+            X_B, y_B = X[batch_idx], y[batch_idx]
+            alpha_B = alpha_per_class[y_B]
+            grad_W, grad_b = compute_gradients_weighted(X_B, y_B, W, b, alpha_B)
+            G_W += grad_W * grad_W
+            G_b += grad_b * grad_b
+            W -= eta * grad_W / (np.sqrt(G_W) + eps)
+            b -= eta * grad_b / (np.sqrt(G_b) + eps)
+        losses.append(weighted_cross_entropy_loss(X, y, W, b, alpha_per_example_full))
+
+    return W, b, losses
+```
+Baseline is called with `alpha_full = np.ones(3)` (so `alpha_power` doesn't matter); Classweight
+with `alpha_full = compute_class_alpha(y), alpha_power = 1.0`; Classweight2 with the same
+`alpha_full, alpha_power = 0.3`.
+
+**Verification result:** ran Baseline, Classweight, and Classweight2 for 5 epochs each and compared
+against `data/weight_traces/part_b/*_epoch{1-5}.txt` and `loss_by_epoch.csv` -- max weight/bias
+differences ~1e-10, losses matched to ~1e-16. All three confirmed correct.
+
+---
+
+## Step 4 (part_b.py): Focal loss
+
+**What's different:** classweight/classweight2 use a FIXED per-class multiplier -- every AF
+example gets the same boost regardless of the model's current prediction. Focal loss computes a
+weight DYNAMICALLY per example, from the model's current prediction: an example already classified
+confidently and correctly gets almost no weight ("easy"); a wrong/unsure example gets close to full
+weight ("hard"). Training focus naturally shifts toward hard examples as training progresses.
+
+**The loss:**
+```
+L(W,b) = -(1/n) * sum_i  alpha'_{y_i} * (1 - p_{i,y_i})^gamma * log(p_{i,y_i})
+gamma = 2.0                        <- fixed "focusing" exponent
+alpha'_c = sqrt(alpha_c)           <- same alpha_c as Step 2, square-rooted
+```
+`(1-p_t)^gamma`: near 0 when `p_t` (true-class probability) is near 1 (easy, correct) -- almost no
+contribution. Near 1 when `p_t` is small (hard, wrong) -- full contribution.
+
+**The gradient**, given in terms of pre-softmax logits `z_k` (`t = y_i` = true class):
+```
+dL_i/dz_k = alpha'_t * (1-p_t)^(gamma-1) * [(1-p_t) - gamma*p_t*log(p_t)] * (p_k - 1[k=t])
+```
+`(p_k - 1[k=t])` is exactly `E = P - Y` from Part (a) -- so the whole gradient is just `E` scaled by
+one dynamic per-example scalar:
+```
+factor_i = alpha'_t * (1-p_t)^(gamma-1) * [(1-p_t) - gamma*p_t*log(p_t)]
+dL_i/dZ  = factor_i * E[i,:]
+```
+Averaged (plain mean, NOT alpha-sum-normalized like classweight) over the batch:
+```
+gW = X_B^T @ (factor * E) / m
+gb = sum over rows of (factor * E) / m
+```
+**Stability:** clip `p_t` to `[1e-12, 1-1e-12]` before `log(p_t)` only.
+
+**Self-check (spec):** `gamma=0, alpha'_c=1` makes `factor_i` reduce to exactly `1`
+(`(1-p_t)^{-1} * (1-p_t) = 1`), collapsing this to Part (a)'s ordinary gradient -- confirms the
+formula generalizes it.
+
+**The code:**
+```python
+def focal_loss(X, y, W, b, alpha_prime_per_class, gamma=2.0):
+    n = X.shape[0]
+    Z = compute_logits(X, W, b)
+    P = softmax(Z)
+    p_t = P[np.arange(n), y]
+    p_t_clipped = np.clip(p_t, 1e-12, 1 - 1e-12)
+    alpha_prime_t = alpha_prime_per_class[y]
+    per_example = alpha_prime_t * (1 - p_t) ** gamma * (-np.log(p_t_clipped))
+    return np.mean(per_example)
+
+
+def compute_gradients_focal(X, y, W, b, alpha_prime_per_class, gamma=2.0):
+    m = X.shape[0]
+    Z = compute_logits(X, W, b)
+    P = softmax(Z)
+    Y = one_hot(y, num_classes=W.shape[1])
+    E = P - Y
+
+    p_t = P[np.arange(m), y]
+    p_t_clipped = np.clip(p_t, 1e-12, 1 - 1e-12)
+    log_pt = np.log(p_t_clipped)
+    alpha_prime_t = alpha_prime_per_class[y]
+
+    factor = alpha_prime_t * (1 - p_t) ** (gamma - 1) * ((1 - p_t) - gamma * p_t * log_pt)
+    dLdZ = factor[:, None] * E
+
+    grad_W = X.T @ dLdZ / m
+    grad_b = dLdZ.sum(axis=0) / m
+    return grad_W, grad_b
+
+
+def train_focal_adagrad(X, y, alpha_prime_per_class, gamma=2.0, epochs=200, eta=0.3,
+                         batch_size=32, eps=1e-8, seed=774):
+    n, d = X.shape
+    W = np.zeros((d, 3), dtype=np.float64)
+    b = np.zeros(3, dtype=np.float64)
+    G_W = np.zeros_like(W)
+    G_b = np.zeros_like(b)
+    rng = np.random.default_rng(seed)
+    losses = []
+    for _ in range(epochs):
+        for batch_idx in iterate_batches(n, batch_size=batch_size, rng=rng):
+            X_B, y_B = X[batch_idx], y[batch_idx]
+            grad_W, grad_b = compute_gradients_focal(X_B, y_B, W, b, alpha_prime_per_class, gamma)
+            G_W += grad_W * grad_W
+            G_b += grad_b * grad_b
+            W -= eta * grad_W / (np.sqrt(G_W) + eps)
+            b -= eta * grad_b / (np.sqrt(G_b) + eps)
+        losses.append(focal_loss(X, y, W, b, alpha_prime_per_class, gamma))
+    return W, b, losses
+```
+
+On the real data: `alpha_prime_per_class = [0.726 (Normal), 1.981 (AF), 1.085 (Other)]` (the
+square-rooted, dampened version of Step 2's alpha values).
+
+**Verification result:** ran focal for 5 epochs, compared against
+`data/weight_traces/part_b/focal_epoch{1-5}.txt` and `loss_by_epoch.csv` -- max weight/bias
+differences ~1e-10, losses matched to ~1e-13. Confirmed correct. All four Part (b) methods
+(Baseline, Classweight, Classweight2, Focal) are now verified against the reference traces.
+
+---
+
+## Step 5 (part_b.py): CLI wiring
+
+**What we're doing:** dispatching on `method`, training, predicting on the test set, writing
+outputs -- same idea as Part (a)'s Step 6. The only difference: `alpha` depends on `y_train`, so
+it's computed inside `main()` (once per run), not baked into a static lookup table.
+
+**The code (inside main()):**
+```python
+    if method == "baseline":
+        W, b, _losses = train_weighted_adagrad(X_train, y_train, np.ones(3), alpha_power=1.0)
+    elif method == "classweight":
+        alpha_full = compute_class_alpha(y_train)
+        W, b, _losses = train_weighted_adagrad(X_train, y_train, alpha_full, alpha_power=1.0)
+    elif method == "classweight2":
+        alpha_full = compute_class_alpha(y_train)
+        W, b, _losses = train_weighted_adagrad(X_train, y_train, alpha_full, alpha_power=0.3)
+    elif method == "focal":
+        alpha_prime = compute_class_alpha(y_train) ** 0.5
+        W, b, _losses = train_focal_adagrad(X_train, y_train, alpha_prime, gamma=2.0)
+    else:
+        print(f"unknown method '{method}', expected one of "
+              "{baseline, classweight, classweight2, focal}", file=sys.stderr)
+        sys.exit(1)
+
+    P_test = softmax(compute_logits(X_test, W, b))
+    write_weights(weights_path, W, b)
+    write_predictions(predictions_path, P_test)
+```
+
+**End-to-end verification:** ran all four methods against the real `part_ab_train.csv` /
+`part_ab_test_public.csv` (924 test rows). `weights.txt` = 79 lines and `predictions.txt` = 924
+lines for every method; every prediction row sums to 1 within ~1e-16. All four ran in 7-13 seconds.
+
+**`part_b.py` is now functionally complete** for Part (b)'s required CLI:
+```
+python3 part_b.py part_ab_train.csv part_ab_test_public.csv {baseline,classweight,classweight2,focal} \
+    predictions.txt weights.txt
+```
+Unlike Part (a), the assignment's Report section doesn't require separate plots for Part (b) -- no
+report-generation script needed here.
+
+---
+
 *(more sections appended as we progress through the assignment)*
