@@ -4,5 +4,6 @@ __pycache__/
 .env
 *.pkl
 *.joblib
-# Uncomment to keep large datasets out of git:
-# data/
+data/
+predictions_*.txt
+weights_*.txt
