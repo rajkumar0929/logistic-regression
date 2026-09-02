@@ -50,6 +50,34 @@ def standardize_apply(X, mean, std):
     return (X - mean) / std
 
 
+def compute_logits(X, W, b):
+    """X: (n,78), W: (78,3), b: (3,) -> Z: (n,3) raw per-class scores."""
+    return X @ W + b
+
+
+def softmax(Z):
+    """
+    Z: (n,3) logits -> (n,3) class probabilities (rows sum to 1).
+
+    Numerically stable per spec: subtract the row-wise max logit, then clip
+    the shifted logits to [-60, 0] before exponentiating.
+    """
+    row_max = Z.max(axis=1, keepdims=True)      # (n,1) - largest logit per row
+    Z_shifted = Z - row_max                     # broadcast: (n,3) - (n,1) -> (n,3)
+    Z_clipped = np.clip(Z_shifted, -60.0, 0.0)
+    exp_Z = np.exp(Z_clipped)
+    return exp_Z / exp_Z.sum(axis=1, keepdims=True)
+
+
+def cross_entropy_loss(X, y, W, b):
+    """Mean cross-entropy loss over all rows of X (no regularization)."""
+    n = X.shape[0]
+    Z = compute_logits(X, W, b)
+    P = softmax(Z)
+    true_class_probs = P[np.arange(n), y]        # (n,) - P[i, y[i]] for every i
+    return -np.mean(np.log(true_class_probs))
+
+
 def main():
     if len(sys.argv) != 6:
         print(

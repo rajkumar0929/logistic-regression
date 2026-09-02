@@ -106,4 +106,90 @@ def standardize_apply(X, mean, std):
 
 ---
 
+## Step 2: Softmax + cross-entropy loss
+
+**What we're doing:** turning raw per-class scores (logits) into class probabilities via softmax,
+then measuring how wrong those probabilities are against the true labels via cross-entropy loss.
+This loss is what all four training methods in Step 4 will minimize.
+
+**Intuition:**
+- Logits `z = x @ W + b` are arbitrary real numbers, one per class — bigger means "the model
+  favors this class more," but they don't sum to 1 and can be negative.
+- Softmax exponentiates (making everything positive) and normalizes (dividing by the row total),
+  turning logits into a valid probability distribution over the 3 classes.
+- Cross-entropy loss penalizes the model based on how much probability it assigned to the
+  *correct* class: near 0 penalty if it was confident and correct, huge penalty if it was
+  confident and wrong.
+
+**The math:**
+
+Logits for one example:
+```
+z = x @ W + b        # shape (3,)
+```
+For a whole batch:
+```
+Z = X @ W + b         # shape (n, 3)
+```
+
+Softmax (naive form):
+```
+p_k = exp(z_k) / sum_j exp(z_j)          for k = 0, 1, 2
+```
+
+Numerically stable form (mathematically identical — shifting every logit in a row by the same
+constant doesn't change the result, since the shift factors out of numerator and denominator):
+```
+m         = row-wise max of Z
+Z_shifted = Z - m
+Z_clipped = clip(Z_shifted, -60, 0)      <- spec's exact stability rule
+P         = exp(Z_clipped) / row-wise sum of exp(Z_clipped)
+```
+
+Cross-entropy loss (mean over all rows, no regularization):
+```
+loss_i = -log( p_i, y_i )                # p_i,y_i = predicted prob of the TRUE class for row i
+L = (1/n) * sum_i loss_i
+```
+
+**Why the stability trick works:** `exp(z_k - c) / sum_j exp(z_j - c) = exp(z_k) / sum_j exp(z_j)`
+for ANY constant `c`, because `exp(z_k - c) = exp(z_k) * exp(-c)`, and the `exp(-c)` factor cancels
+between numerator and denominator. Choosing `c = max_j z_j` makes the largest shifted logit exactly
+0, so every `exp(...)` term is safely in `(0, 1]` — no overflow.
+
+**The code (part_a.py):**
+
+```python
+def compute_logits(X, W, b):
+    return X @ W + b
+
+
+def softmax(Z):
+    row_max = Z.max(axis=1, keepdims=True)      # (n,1) - largest logit per row
+    Z_shifted = Z - row_max                     # broadcast: (n,3) - (n,1) -> (n,3)
+    Z_clipped = np.clip(Z_shifted, -60.0, 0.0)
+    exp_Z = np.exp(Z_clipped)
+    return exp_Z / exp_Z.sum(axis=1, keepdims=True)
+
+
+def cross_entropy_loss(X, y, W, b):
+    n = X.shape[0]
+    Z = compute_logits(X, W, b)
+    P = softmax(Z)
+    true_class_probs = P[np.arange(n), y]        # (n,) - P[i, y[i]] for every i
+    return -np.mean(np.log(true_class_probs))
+```
+
+**Why each piece matters:**
+- `keepdims=True` on both the max and the sum is essential: it keeps the result shape `(n,1)`
+  instead of `(n,)`, so broadcasting against `(n,3)` subtracts/divides *each row's own* value
+  from every entry in that row, rather than misaligning rows and columns.
+- `P[np.arange(n), y]` is numpy fancy indexing: `np.arange(n)` gives row indices `0..n-1` and `y`
+  gives the true class per row, so this single expression extracts `P[i, y[i]]` for every `i` at
+  once — no Python loop needed.
+- This loss function will be called both for epoch-level full-training-set loss logging (Step 4)
+  and, if needed, for validation loss — same function, different `X, y` passed in.
+
+---
+
 *(more sections appended as we progress through the assignment)*
