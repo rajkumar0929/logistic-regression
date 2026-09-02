@@ -854,4 +854,31 @@ report-generation script needed here.
 
 ---
 
+## verify_traces.py — permanent, re-runnable correctness check
+
+**What it's for:** a standalone script (NOT part of the graded submission) that re-runs the same
+epoch-by-epoch verification done during Parts (a) and (b) development, against
+`data/weight_traces/`, so you can re-check correctness yourself anytime rather than trusting past
+runs blindly.
+
+**How it works:** imports `part_a` and `part_b` as modules (their `main()` only runs under
+`if __name__ == "__main__"`, so importing them has no side effects), calls each `train_*` function
+with `epochs=1..5`, and diffs the resulting `W`, `b`, and final loss against the corresponding
+`data/weight_traces/part_a|b/<method>_epoch<N>.txt` file and `loss_by_epoch.csv` row. A run counts
+as PASS if the max absolute weight/bias difference is under `1e-6` and the loss difference is
+under `1e-6` (comfortably above the ~1e-10 to 1e-13 floating-point noise actually observed).
+
+**Usage:**
+```
+python3 verify_traces.py       # both parts
+python3 verify_traces.py a     # part (a) only
+python3 verify_traces.py b     # part (b) only
+```
+Exits with status 0 if everything passes, 1 otherwise (so it can be scripted/CI'd if you want).
+
+**Not part of the submission zip** -- only `part_a.py`, `part_b.py`, `part_c.py`, and `report.pdf`
+go in the final archive per the assignment's submission instructions.
+
+---
+
 *(more sections appended as we progress through the assignment)*
