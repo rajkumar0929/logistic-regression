@@ -457,4 +457,57 @@ def write_predictions(path, P):
 
 ---
 
+## Step 6: CLI wiring (main())
+
+**What we're doing:** replacing `main()`'s `raise NotImplementedError` placeholder with the real
+dispatch: pick the right trainer for the requested `method`, train it, turn the resulting `W, b`
+into test-set probabilities, and write both output files. This finishes Part (a)'s `part_a.py`.
+
+**The logic:**
+1. Validate `method` is one of the four keys in the `METHODS` dict (Step 4) — otherwise print a
+   usage error and exit rather than crashing with a confusing `KeyError`.
+2. Call `METHODS[method](X_train, y_train)` to get back `W, b` (the per-epoch `losses` list is
+   discarded here — it's only needed for the report's loss-vs-time plots, generated separately).
+3. Get test-set probabilities the same way Step 2 computes training-set probabilities internally —
+   `compute_logits` then `softmax` — just with no label to compare against.
+4. Write both files with Step 5's writers.
+
+**The code (part_a.py, inside main()):**
+
+```python
+    if method not in METHODS:
+        print(f"unknown method '{method}', expected one of {sorted(METHODS)}", file=sys.stderr)
+        sys.exit(1)
+
+    W, b, _losses = METHODS[method](X_train, y_train)
+
+    P_test = softmax(compute_logits(X_test, W, b))
+
+    write_weights(weights_path, W, b)
+    write_predictions(predictions_path, P_test)
+```
+
+**End-to-end verification:** ran all four methods against the real `part_ab_train.csv` /
+`part_ab_test_public.csv` (924 test rows). Results:
+- `weights.txt`: exactly 79 lines for every method.
+- `predictions.txt`: exactly 924 lines (one per test row) for every method.
+- Every prediction row sums to 1 within ~1e-16 (floating-point noise).
+- Full-batch (500 epochs) ~8s, mini-batch (200 epochs) ~6s, SGD (30 epochs) ~11s, AdaGrad (200
+  epochs) ~6s — all comfortably fast, no Kaggle/GPU needed for Part (a).
+
+**`part_a.py` is now functionally complete** for Part (a)'s required CLI:
+```
+python3 part_a.py part_ab_train.csv part_ab_test_public.csv {full_batch,mini_batch,sgd,adagrad} \
+    predictions.txt weights.txt
+```
+
+**Still open (for the report, not part_a.py itself):** the report needs training-loss AND
+validation-loss vs. time plots for all four methods on the same axes. `part_a.py`'s graded CLI only
+takes train+test paths (no validation path, per spec) and doesn't track wall-clock time per epoch —
+so generating those plots will need a separate small script that reuses these same functions
+(`load_xy`, `standardize_fit/apply`, the four `train_*` functions extended to also evaluate
+`part_ab_val.csv`'s loss and record `time.time()` per epoch). Not yet built.
+
+---
+
 *(more sections appended as we progress through the assignment)*

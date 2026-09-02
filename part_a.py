@@ -232,9 +232,16 @@ def main():
     X_train = standardize_apply(X_train_raw, mean, std)
     X_test = standardize_apply(X_test_raw, mean, std)
 
-    # TODO (later steps): train with the requested method, write predictions.txt
-    # and weights.txt.
-    raise NotImplementedError(f"method dispatch for '{method}' not implemented yet")
+    if method not in METHODS:
+        print(f"unknown method '{method}', expected one of {sorted(METHODS)}", file=sys.stderr)
+        sys.exit(1)
+
+    W, b, _losses = METHODS[method](X_train, y_train)
+
+    P_test = softmax(compute_logits(X_test, W, b))
+
+    write_weights(weights_path, W, b)
+    write_predictions(predictions_path, P_test)
 
 
 if __name__ == "__main__":
