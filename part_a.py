@@ -78,6 +78,30 @@ def cross_entropy_loss(X, y, W, b):
     return -np.mean(np.log(true_class_probs))
 
 
+def one_hot(y, num_classes):
+    """y: (m,) int labels -> (m, num_classes) one-hot matrix."""
+    return np.eye(num_classes)[y]
+
+
+def compute_gradients(X, y, W, b):
+    """
+    Gradient of mean cross-entropy loss w.r.t. W and b, for the batch (X, y).
+
+    Divides by the CURRENT batch size m = X.shape[0] (per spec), not the
+    full training-set size n.
+    """
+    m = X.shape[0]
+    Z = compute_logits(X, W, b)
+    P = softmax(Z)
+    Y = one_hot(y, num_classes=W.shape[1])
+    E = P - Y                      # (m,3) - error per example per class
+
+    grad_W = (X.T @ E) / m         # (78,m) @ (m,3) -> (78,3), matches W's shape
+    grad_b = E.sum(axis=0) / m     # (3,) - average error per class
+
+    return grad_W, grad_b
+
+
 def main():
     if len(sys.argv) != 6:
         print(

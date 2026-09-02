@@ -192,4 +192,65 @@ def cross_entropy_loss(X, y, W, b):
 
 ---
 
+## Step 3: Gradient of the loss w.r.t. W and b
+
+**What we're doing:** deriving the direction to nudge every entry of `W` and `b` to reduce the
+cross-entropy loss. One formula, reused unchanged by all four training methods in Step 4 — only
+how much data counts as "the batch" differs between them.
+
+**Intuition:** softmax + cross-entropy has a famously clean combined gradient. The "error signal"
+per example is just `(predicted probabilities - true one-hot)`. A confident, wrong prediction gives
+a big error signal (big gradient step); a near-perfect prediction gives an error signal near zero
+(tiny gradient step).
+
+**The math:**
+
+For a batch of `m` examples, with `P` = softmax probabilities `(m,3)` and `Y` = one-hot true labels
+`(m,3)`:
+
+```
+E = P - Y                     # (m,3) - error per example per class
+
+dL/dW = (1/m) * X^T @ E       # (78,3) - X^T is (78,m), E is (m,3)
+dL/db = (1/m) * sum over rows of E     # (3,) - average error per class
+```
+
+**Critical rule:** `m` is the CURRENT batch's size (`|B|`), not the full training-set size `n`.
+Full-batch GD -> `m = n`. Mini-batch/AdaGrad -> `m = 32`. SGD -> `m = 1`. Same formula every time.
+
+**Why the shapes work:** `X` is `(m,78)` so `X^T` is `(78,m)`; `X^T @ E` is `(78,m) @ (m,3) =
+(78,3)`, matching `W`. Entry `dL/dW[j,k] = (1/m) * sum_i X[i,j] * E[i,k]` — how much feature `j`,
+weighted by the error on class `k`, mattered across the batch.
+
+**The code (part_a.py):**
+
+```python
+def one_hot(y, num_classes):
+    return np.eye(num_classes)[y]
+
+
+def compute_gradients(X, y, W, b):
+    m = X.shape[0]
+    Z = compute_logits(X, W, b)
+    P = softmax(Z)
+    Y = one_hot(y, num_classes=W.shape[1])
+    E = P - Y                      # (m,3) - error per example per class
+
+    grad_W = (X.T @ E) / m         # (78,m) @ (m,3) -> (78,3), matches W's shape
+    grad_b = E.sum(axis=0) / m     # (3,) - average error per class
+
+    return grad_W, grad_b
+```
+
+**Why each piece matters:**
+- `np.eye(num_classes)[y]` builds the one-hot matrix in one line: `np.eye(3)` is the 3x3 identity,
+  and indexing it by the label array `y` picks out row `y[i]` for every `i` — no Python loop.
+- `compute_gradients` reuses `compute_logits`/`softmax` from Step 2 unchanged — this function will
+  be called later with whatever `X, y` slice each training method currently considers "the batch."
+- Dividing by `m = X.shape[0]` (the batch's own size) rather than a fixed `n` is exactly the
+  spec's batch-size gradient rule, and is what makes this one function correct for all four
+  methods in Step 4.
+
+---
+
 *(more sections appended as we progress through the assignment)*
