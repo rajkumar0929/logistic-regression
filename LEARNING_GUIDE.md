@@ -403,4 +403,58 @@ four training loops are confirmed correct.
 
 ---
 
+## Step 5: Writing weights.txt and predictions.txt
+
+**What we're doing:** writing trained `W`, `b`, and predicted test-set probabilities to disk in the
+exact format the autograder expects. No new math here — purely matching the spec precisely, since
+format mismatches cost marks separately from correctness.
+
+**The required formats:**
+
+```
+weights.txt        - exactly 79 lines
+  line 1:      b[0],b[1],b[2]              <- bias, classes N,A,O in that order
+  lines 2-79:  W[j,0],W[j,1],W[j,2]        <- one line per feature j, feature-column order
+
+predictions.txt     - one line per test row, same order as the input CSV
+  p_N,p_A,p_O                              <- three probabilities, comma-separated, sum to 1
+                                               (never hard class labels)
+```
+
+**Why this "just works" given what we already built:**
+- `W`'s row order already matches `weights.txt`'s required feature order — `feature_cols` has been
+  threaded through consistently since Step 1, and `W`'s rows were never reordered relative to it.
+- `predictions.txt`'s row order already matches `test.csv` — only *training* data gets shuffled
+  (Step 4, via index arrays), `X_test` is never touched by that shuffling.
+
+**The code (part_a.py):**
+
+```python
+def format_row(values):
+    return ",".join(f"{v:.17g}" for v in values)
+
+
+def write_weights(path, W, b):
+    with open(path, "w") as f:
+        f.write(format_row(b) + "\n")
+        for row in W:
+            f.write(format_row(row) + "\n")
+
+
+def write_predictions(path, P):
+    with open(path, "w") as f:
+        for row in P:
+            f.write(format_row(row) + "\n")
+```
+
+**Why each piece matters:**
+- `.17g` formats each float with 17 significant digits (`g` = general format, no trailing zeros,
+  scientific notation only if needed) — 17 significant digits is the mathematically-guaranteed
+  minimum number of digits to round-trip any float64 value exactly, which matters for the
+  autograder's "match reference within tolerance" check.
+- `format_row` is one shared helper for both files, since both need the same
+  "three comma-separated numbers, one line" shape.
+
+---
+
 *(more sections appended as we progress through the assignment)*

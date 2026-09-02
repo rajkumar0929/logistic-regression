@@ -194,6 +194,26 @@ METHODS = {
 }
 
 
+def format_row(values):
+    """Comma-separated values, each with enough precision to round-trip a float64."""
+    return ",".join(f"{v:.17g}" for v in values)
+
+
+def write_weights(path, W, b):
+    """weights.txt: line 1 = bias (3 values), lines 2-79 = rows of W (3 values each)."""
+    with open(path, "w") as f:
+        f.write(format_row(b) + "\n")
+        for row in W:
+            f.write(format_row(row) + "\n")
+
+
+def write_predictions(path, P):
+    """predictions.txt: one line per row, p(N),p(A),p(O), in P's row order."""
+    with open(path, "w") as f:
+        for row in P:
+            f.write(format_row(row) + "\n")
+
+
 def main():
     if len(sys.argv) != 6:
         print(
